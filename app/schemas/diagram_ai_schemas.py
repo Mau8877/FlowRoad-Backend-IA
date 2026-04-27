@@ -14,6 +14,8 @@ class CompactNodeType(str, Enum):
     FINAL = "FINAL"
     ACTION = "ACTION"
     DECISION = "DECISION"
+    FORK = "FORK"
+    JOIN = "JOIN"
 
 
 class FieldType(str, Enum):
@@ -239,6 +241,19 @@ class DiagramAiCompactResponse(BaseModel):
             raise ValueError(
                 "Todos los ACTION deben tener template_suggestions. "
                 f"Faltan: {sorted(missing)}"
+            )
+
+        non_action_ids = {
+            node.id
+            for node in self.diagram.nodes
+            if node.type != CompactNodeType.ACTION
+        }
+        invalid_suggestions = suggested_ids.intersection(non_action_ids)
+
+        if invalid_suggestions:
+            raise ValueError(
+                "Solo los nodos ACTION pueden tener template_suggestions. "
+                f"Nodos inválidos: {sorted(invalid_suggestions)}"
             )
 
         return self

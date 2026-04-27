@@ -33,6 +33,19 @@ class DiagramSemanticValidator:
             self._validate_decision_outgoing_links(diagram, outgoing)
         )
         errors.extend(
+            self._validate_fork_join_nodes(
+                diagram=diagram,
+                incoming=incoming,
+                outgoing=outgoing,
+            )
+        )
+        errors.extend(
+            self._validate_no_templates_for_control_nodes(
+                diagram=diagram,
+                template_suggestions=template_suggestions,
+            )
+        )
+        errors.extend(
             self._validate_decision_previous_action_select(
                 diagram=diagram,
                 template_suggestions=template_suggestions,
@@ -58,6 +71,12 @@ class DiagramSemanticValidator:
         )
         errors.extend(
             self._validate_every_action_reaches_final(
+                diagram=diagram,
+                outgoing=outgoing,
+            )
+        )
+        errors.extend(
+            self._validate_control_nodes_reach_final(
                 diagram=diagram,
                 outgoing=outgoing,
             )
@@ -106,6 +125,71 @@ class DiagramSemanticValidator:
             if outgoing_count < 2:
                 errors.append(
                     f"La DECISION '{decision_id}' debe tener al menos 2 salidas."
+                )
+
+        return errors
+
+    def _validate_fork_join_nodes(
+        self,
+        diagram: CompactDiagram,
+        incoming: dict[str, list[str]],
+        outgoing: dict[str, list[str]],
+    ) -> list[str]:
+        errors: list[str] = []
+
+        for node in diagram.nodes:
+            incoming_count = len(incoming.get(node.id, []))
+            outgoing_count = len(outgoing.get(node.id, []))
+
+            if node.type == CompactNodeType.FORK:
+                if incoming_count != 1:
+                    errors.append(
+                        f"El FORK '{node.id}' debe tener exactamente 1 entrada."
+                    )
+
+                if outgoing_count < 2:
+                    errors.append(
+                        f"El FORK '{node.id}' debe tener al menos 2 salidas."
+                    )
+
+            if node.type == CompactNodeType.JOIN:
+                if incoming_count < 2:
+                    errors.append(
+                        f"El JOIN '{node.id}' debe tener al menos 2 entradas."
+                    )
+
+                if outgoing_count != 1:
+                    errors.append(
+                        f"El JOIN '{node.id}' debe tener exactamente 1 salida."
+                    )
+
+        return errors
+
+    def _validate_no_templates_for_control_nodes(
+        self,
+        diagram: CompactDiagram,
+        template_suggestions: list[TemplateSuggestion],
+    ) -> list[str]:
+        errors: list[str] = []
+
+        control_node_ids = {
+            node.id
+            for node in diagram.nodes
+            if node.type
+            in {
+                CompactNodeType.INITIAL,
+                CompactNodeType.FINAL,
+                CompactNodeType.DECISION,
+                CompactNodeType.FORK,
+                CompactNodeType.JOIN,
+            }
+        }
+
+        for suggestion in template_suggestions:
+            if suggestion.node_id in control_node_ids:
+                errors.append(
+                    f"El nodo de control '{suggestion.node_id}' no debe tener "
+                    "template_suggestions."
                 )
 
         return errors
@@ -290,6 +374,35 @@ class DiagramSemanticValidator:
 
         return errors
 
+    def _validate_control_nodes_reach_final(
+        self,
+        diagram: CompactDiagram,
+        outgoing: dict[str, list[str]],
+    ) -> list[str]:
+        errors: list[str] = []
+
+        final_ids = {
+            node.id
+            for node in diagram.nodes
+            if node.type == CompactNodeType.FINAL
+        }
+
+        if not final_ids:
+            return []
+
+        for node in diagram.nodes:
+            if node.type not in {CompactNodeType.FORK, CompactNodeType.JOIN}:
+                continue
+
+            reachable = self._reachable_from(node.id, outgoing)
+
+            if not reachable.intersection(final_ids):
+                errors.append(
+                    f"El nodo '{node.id}' no tiene ruta hacia ningún FINAL."
+                )
+
+        return errors
+
     def _reachable_from(
         self,
         start_id: str,
@@ -402,6 +515,9 @@ class DiagramSemanticValidator:
             return True
 
         if {"disponible", "no disponible"}.issubset(option_values):
+            return True
+
+        if {"completo", "incompleto"}.issubset(option_values):
             return True
 
         return False

@@ -102,6 +102,17 @@ class DiagramAiService:
         request: DiagramAiRequest,
     ) -> DiagramAiCompactResponse:
         parsed_response = self._parse_json_response(raw_response)
+
+        parsed_response = self._repair_missing_template_suggestions(
+            parsed_response=parsed_response,
+            request=request,
+        )
+
+        parsed_response = self._normalize_ai_response_before_validation(
+            parsed_response=parsed_response,
+            request=request,
+        )
+
         parsed_response = self._repair_missing_template_suggestions(
             parsed_response=parsed_response,
             request=request,
@@ -181,6 +192,7 @@ La respuesta debe cumplir esta estructura exacta:
 Reglas críticas:
 - Usa únicamente department_id reales del contexto.
 - Cada ACTION debe tener template_suggestions.
+- FORK y JOIN no deben tener template_suggestions.
 - Cada DECISION debe estar precedida por un ACTION con SELECT compatible.
 - Todo link que salga desde DECISION debe tener label.
 - Si usas plantilla existente, strategy debe ser USE_EXISTING_TEMPLATE.
@@ -190,7 +202,44 @@ Reglas críticas:
   crea un ACTION inicial para esa etapa antes de avanzar a otra área.
 - Si propones un SELECT decisorio en una plantilla, crea un DECISION inmediatamente
   después de ese ACTION.
-- Si no creas DECISION después de un ACTION, evita poner SELECT decisorio en su plantilla.
+- Si no creas DECISION después de un ACTION, evita poner SELECT decisorio
+  en su plantilla.
+
+Reglas críticas de FORK/JOIN:
+- Si el usuario pide tareas paralelas, simultáneas, al mismo tiempo, ambas tareas,
+  dividir el proceso, unir ramas, fork o join, debes crear nodos FORK y JOIN.
+- No representes paralelismo como una secuencia.
+- FORK divide el flujo en ramas paralelas.
+- JOIN une/sincroniza ramas paralelas.
+- El FORK debe tener exactamente 1 entrada y mínimo 2 salidas.
+- El JOIN debe tener mínimo 2 entradas y exactamente 1 salida.
+- Las tareas paralelas deben salir del mismo FORK y llegar al mismo JOIN.
+- Después del JOIN debe continuar el flujo principal.
+- FORK y JOIN no son tareas humanas.
+- FORK y JOIN no llevan plantillas.
+- FORK y JOIN no deben aparecer en template_suggestions.
+- En el JSON compacto usa type "FORK" para dividir y type "JOIN" para unir.
+- El backend visual convertirá tanto FORK como JOIN a una barra negra
+  customData.tipo = "FORK", porque así funciona FlowRoad actualmente.
+
+Ejemplo correcto de paralelismo:
+nodes:
+- node-fork-preparacion type FORK
+- node-preparar-contrato type ACTION
+- node-preparar-vehiculo type ACTION
+- node-join-preparacion type JOIN
+
+links:
+- node-anterior -> node-fork-preparacion
+- node-fork-preparacion -> node-preparar-contrato
+- node-fork-preparacion -> node-preparar-vehiculo
+- node-preparar-contrato -> node-join-preparacion
+- node-preparar-vehiculo -> node-join-preparacion
+- node-join-preparacion -> node-siguiente
+
+Ejemplo incorrecto:
+node-anterior -> node-preparar-contrato -> node-preparar-vehiculo -> node-siguiente
+Eso es secuencia, no paralelismo.
 """
 
         return await self.openrouter_service.chat_completion(
@@ -247,7 +296,32 @@ Reglas obligatorias:
 - Si un ACTION queda sin salida, conéctalo al FINAL o a un nodo que llegue al FINAL.
 - Cada ACTION debe tener template_suggestions.
 - Si falta template_suggestion, puedes crear CREATE_NEW_TEMPLATE.
+- FORK y JOIN no deben tener template_suggestions.
 - Usa snake_case.
+
+Reglas obligatorias de FORK/JOIN:
+- Si el usuario pidió paralelismo, tareas simultáneas, fork, join,
+  dividir ramas o unir ramas, debes usar FORK y JOIN.
+- No simules paralelismo conectando acciones en secuencia.
+- FORK debe tener exactamente 1 entrada y mínimo 2 salidas.
+- JOIN debe tener mínimo 2 entradas y exactamente 1 salida.
+- Las tareas paralelas deben salir del mismo FORK y llegar al mismo JOIN.
+- Después del JOIN debe continuar el flujo principal.
+- FORK y JOIN no son ACTION.
+- FORK y JOIN no tienen plantilla.
+- FORK y JOIN no deben aparecer en template_suggestions.
+- Si un FORK tiene menos de 2 salidas, corrígelo.
+- Si un JOIN tiene menos de 2 entradas, corrígelo.
+- Si un JOIN tiene más de 1 salida, corrígelo.
+- Si un FORK tiene más de 1 entrada, corrígelo.
+
+Ejemplo correcto:
+anterior -> FORK
+FORK -> ACTION rama 1
+FORK -> ACTION rama 2
+ACTION rama 1 -> JOIN
+ACTION rama 2 -> JOIN
+JOIN -> siguiente
 """
 
         return await self.openrouter_service.chat_completion(
@@ -274,6 +348,557 @@ Reglas obligatorias:
             ],
         }
 
+    def _normalize_ai_response_before_validation(
+        self,
+        parsed_response: dict[str, Any],
+        request: DiagramAiRequest,
+    ) -> dict[str, Any]:
+        diagram = parsed_response.get("diagram")
+
+        if not isinstance(diagram, dict):
+            return parsed_response
+
+        nodes = diagram.get("nodes")
+        links = diagram.get("links")
+        suggestions = parsed_response.get("template_suggestions")
+
+        if not isinstance(nodes, list):
+            return parsed_response
+
+        if not isinstance(links, list):
+            links = []
+            diagram["links"] = links
+
+        if not isinstance(suggestions, list):
+            suggestions = []
+            parsed_response["template_suggestions"] = suggestions
+
+        changes = parsed_response.get("changes_summary")
+        if not isinstance(changes, list):
+            changes = []
+            parsed_response["changes_summary"] = changes
+
+        warnings = parsed_response.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+            parsed_response["warnings"] = warnings
+
+        self._remove_template_suggestions_for_control_nodes(
+            nodes=nodes,
+            suggestions=suggestions,
+            changes=changes,
+        )
+
+        self._reuse_existing_templates_when_possible(
+            suggestions=suggestions,
+            request=request,
+            changes=changes,
+        )
+
+        self._downgrade_operational_decision_selects(
+            nodes=nodes,
+            suggestions=suggestions,
+            changes=changes,
+        )
+
+        self._fix_decision_action_links(
+            nodes=nodes,
+            links=links,
+            suggestions=suggestions,
+            request=request,
+            changes=changes,
+        )
+
+        self._fix_decision_outgoing_links(
+            nodes=nodes,
+            links=links,
+            suggestions=suggestions,
+            request=request,
+            changes=changes,
+        )
+
+        self._fix_nodes_without_path_to_final(
+            nodes=nodes,
+            links=links,
+            changes=changes,
+        )
+
+        return parsed_response
+
+    def _remove_template_suggestions_for_control_nodes(
+        self,
+        nodes: list[dict[str, Any]],
+        suggestions: list[dict[str, Any]],
+        changes: list[str],
+    ) -> None:
+        action_ids = {
+            node.get("id")
+            for node in nodes
+            if isinstance(node, dict) and node.get("type") == "ACTION"
+        }
+
+        before = len(suggestions)
+
+        suggestions[:] = [
+            suggestion
+            for suggestion in suggestions
+            if isinstance(suggestion, dict)
+            and suggestion.get("node_id") in action_ids
+        ]
+
+        removed = before - len(suggestions)
+        if removed > 0:
+            changes.append(
+                f"Se eliminaron {removed} template_suggestions inválidos de nodos de control."
+            )
+
+    def _reuse_existing_templates_when_possible(
+        self,
+        suggestions: list[dict[str, Any]],
+        request: DiagramAiRequest,
+        changes: list[str],
+    ) -> None:
+        existing_by_name_and_department: dict[tuple[str, str], Any] = {}
+
+        for template in request.existing_templates:
+            key = (
+                self._normalize_text(template.name),
+                template.department_id or "",
+            )
+            existing_by_name_and_department[key] = template
+
+        for suggestion in suggestions:
+            if not isinstance(suggestion, dict):
+                continue
+
+            if suggestion.get("strategy") != "CREATE_NEW_TEMPLATE":
+                continue
+
+            template = suggestion.get("template")
+            if not isinstance(template, dict):
+                continue
+
+            template_name = str(template.get("name") or "")
+            department_id = str(template.get("department_id") or "")
+
+            key = (
+                self._normalize_text(template_name),
+                department_id,
+            )
+
+            existing_template = existing_by_name_and_department.get(key)
+
+            if not existing_template:
+                continue
+
+            suggestion["strategy"] = "USE_EXISTING_TEMPLATE"
+            suggestion["existing_template_id"] = existing_template.id
+            suggestion["existing_template_name"] = existing_template.name
+            suggestion["template"] = None
+            suggestion["reason"] = (
+                "Se reutilizó una plantilla existente con el mismo nombre "
+                "y departamento para evitar duplicados."
+            )
+
+            changes.append(
+                f"Se reutilizó la plantilla existente '{existing_template.name}' "
+                f"para el nodo '{suggestion.get('node_id')}'."
+            )
+
+    def _downgrade_operational_decision_selects(
+        self,
+        nodes: list[dict[str, Any]],
+        suggestions: list[dict[str, Any]],
+        changes: list[str],
+    ) -> None:
+        node_by_id = {
+            node.get("id"): node
+            for node in nodes
+            if isinstance(node, dict)
+        }
+
+        for suggestion in suggestions:
+            if not isinstance(suggestion, dict):
+                continue
+
+            if suggestion.get("strategy") != "CREATE_NEW_TEMPLATE":
+                continue
+
+            node_id = suggestion.get("node_id")
+            node = node_by_id.get(node_id)
+
+            if not isinstance(node, dict):
+                continue
+
+            node_name = str(node.get("name") or suggestion.get("node_name") or "")
+
+            if not self._is_operational_action_name(node_name):
+                continue
+
+            template = suggestion.get("template")
+            if not isinstance(template, dict):
+                continue
+
+            fields = template.get("fields")
+            if not isinstance(fields, list):
+                continue
+
+            changed = False
+
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+
+                if field.get("type") != "SELECT":
+                    continue
+
+                options = field.get("options")
+                if not isinstance(options, list):
+                    continue
+
+                if not self._is_decision_options(options):
+                    continue
+
+                field["type"] = "TEXTAREA"
+                field["label"] = "Observaciones"
+                field["required"] = False
+                field["options"] = []
+                field["ui_props"] = {
+                    "grid_cols": 2,
+                }
+                changed = True
+
+            if changed:
+                changes.append(
+                    f"Se cambió un SELECT decisorio por TEXTAREA en el nodo operativo '{node_id}'."
+                )
+
+    def _fix_decision_action_links(
+        self,
+        nodes: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+        suggestions: list[dict[str, Any]],
+        request: DiagramAiRequest,
+        changes: list[str],
+    ) -> None:
+        node_by_id = {
+            node.get("id"): node
+            for node in nodes
+            if isinstance(node, dict)
+        }
+
+        suggestions_by_node_id = {
+            suggestion.get("node_id"): suggestion
+            for suggestion in suggestions
+            if isinstance(suggestion, dict)
+        }
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+
+            if node.get("type") != "ACTION":
+                continue
+
+            node_id = str(node.get("id") or "")
+            node_name = str(node.get("name") or "")
+
+            if not node_id:
+                continue
+
+            suggestion = suggestions_by_node_id.get(node_id)
+            if not isinstance(suggestion, dict):
+                continue
+
+            option_labels = self._get_decision_option_labels_from_suggestion(
+                suggestion=suggestion,
+                request=request,
+            )
+
+            if len(option_labels) < 2:
+                continue
+
+            if self._is_operational_action_name(node_name):
+                continue
+
+            outgoing = self._get_outgoing_links(links, node_id)
+
+            already_has_decision_after = any(
+                node_by_id.get(link.get("target_id"), {}).get("type") == "DECISION"
+                for link in outgoing
+                if isinstance(link, dict)
+            )
+
+            if already_has_decision_after:
+                continue
+
+            matching_decision = self._find_best_matching_decision(
+                action_node=node,
+                nodes=nodes,
+                links=links,
+            )
+
+            if matching_decision:
+                decision_id = str(matching_decision.get("id"))
+
+                links[:] = [
+                    link
+                    for link in links
+                    if not (
+                        isinstance(link, dict)
+                        and link.get("source_id") == node_id
+                        and node_by_id.get(link.get("target_id"), {}).get("type") != "DECISION"
+                    )
+                ]
+
+                if not self._link_exists(links, node_id, decision_id):
+                    links.append(
+                        {
+                            "id": self._build_link_id(node_id, decision_id),
+                            "source_id": node_id,
+                            "target_id": decision_id,
+                            "label": None,
+                        }
+                    )
+
+                changes.append(
+                    f"Se conectó el ACTION '{node_id}' con la DECISION '{decision_id}'."
+                )
+                continue
+
+            if self._is_decision_action_name(node_name):
+                final_id = self._get_first_final_id(nodes)
+                if not final_id:
+                    continue
+
+                old_targets = [
+                    str(link.get("target_id"))
+                    for link in outgoing
+                    if isinstance(link, dict)
+                    and node_by_id.get(link.get("target_id"), {}).get("type") != "DECISION"
+                ]
+
+                links[:] = [
+                    link
+                    for link in links
+                    if not (
+                        isinstance(link, dict)
+                        and link.get("source_id") == node_id
+                    )
+                ]
+
+                decision_id = f"node-decision-{self._slugify(node_name)}"
+
+                if decision_id not in node_by_id:
+                    nodes.append(
+                        {
+                            "id": decision_id,
+                            "type": "DECISION",
+                            "name": self._build_decision_name_from_action(node_name),
+                            "department_id": node.get("department_id"),
+                        }
+                    )
+                    node_by_id[decision_id] = nodes[-1]
+
+                links.append(
+                    {
+                        "id": self._build_link_id(node_id, decision_id),
+                        "source_id": node_id,
+                        "target_id": decision_id,
+                        "label": None,
+                    }
+                )
+
+                positive_target = old_targets[0] if old_targets else final_id
+                negative_target = final_id
+
+                links.append(
+                    {
+                        "id": self._build_link_id(decision_id, positive_target, option_labels[0]),
+                        "source_id": decision_id,
+                        "target_id": positive_target,
+                        "label": option_labels[0],
+                    }
+                )
+                links.append(
+                    {
+                        "id": self._build_link_id(decision_id, negative_target, option_labels[1]),
+                        "source_id": decision_id,
+                        "target_id": negative_target,
+                        "label": option_labels[1],
+                    }
+                )
+
+                changes.append(
+                    f"Se creó una DECISION automática después del ACTION '{node_id}'."
+                )
+
+    def _fix_decision_outgoing_links(
+        self,
+        nodes: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+        suggestions: list[dict[str, Any]],
+        request: DiagramAiRequest,
+        changes: list[str],
+    ) -> None:
+        suggestions_by_node_id = {
+            suggestion.get("node_id"): suggestion
+            for suggestion in suggestions
+            if isinstance(suggestion, dict)
+        }
+
+        final_id = self._get_first_final_id(nodes)
+        if not final_id:
+            return
+
+        for decision in nodes:
+            if not isinstance(decision, dict):
+                continue
+
+            if decision.get("type") != "DECISION":
+                continue
+
+            decision_id = str(decision.get("id") or "")
+            if not decision_id:
+                continue
+
+            incoming_action_id = self._get_single_incoming_action_id(
+                decision_id=decision_id,
+                nodes=nodes,
+                links=links,
+            )
+
+            option_labels = ["Si", "No"]
+
+            if incoming_action_id:
+                suggestion = suggestions_by_node_id.get(incoming_action_id)
+                if isinstance(suggestion, dict):
+                    detected_options = self._get_decision_option_labels_from_suggestion(
+                        suggestion=suggestion,
+                        request=request,
+                    )
+                    if len(detected_options) >= 2:
+                        option_labels = detected_options[:2]
+
+            outgoing = self._get_outgoing_links(links, decision_id)
+
+            if len(outgoing) >= 2:
+                for index, link in enumerate(outgoing[:2]):
+                    if not str(link.get("label") or "").strip():
+                        link["label"] = option_labels[index]
+
+                current_labels = {
+                    self._normalize_text(str(link.get("label") or ""))
+                    for link in outgoing[:2]
+                    if isinstance(link, dict)
+                }
+
+                allowed_labels = {
+                    self._normalize_text(option)
+                    for option in option_labels
+                }
+
+                if not current_labels.issubset(allowed_labels):
+                    for index, link in enumerate(outgoing[:2]):
+                        link["label"] = option_labels[index]
+
+                    changes.append(
+                        f"Se alinearon los labels de la DECISION '{decision_id}' "
+                        "con el SELECT anterior."
+                    )
+
+                continue
+
+            if len(outgoing) == 1:
+                existing_label = str(outgoing[0].get("label") or "").strip()
+                if not existing_label:
+                    outgoing[0]["label"] = option_labels[0]
+
+                missing_label = option_labels[1]
+                links.append(
+                    {
+                        "id": self._build_link_id(decision_id, final_id, missing_label),
+                        "source_id": decision_id,
+                        "target_id": final_id,
+                        "label": missing_label,
+                    }
+                )
+
+                changes.append(
+                    f"Se agregó una segunda salida a la DECISION '{decision_id}'."
+                )
+                continue
+
+            if len(outgoing) == 0:
+                links.append(
+                    {
+                        "id": self._build_link_id(decision_id, final_id, option_labels[0]),
+                        "source_id": decision_id,
+                        "target_id": final_id,
+                        "label": option_labels[0],
+                    }
+                )
+                links.append(
+                    {
+                        "id": self._build_link_id(decision_id, final_id, option_labels[1]),
+                        "source_id": decision_id,
+                        "target_id": final_id,
+                        "label": option_labels[1],
+                    }
+                )
+
+                changes.append(
+                    f"Se agregaron salidas automáticas a la DECISION '{decision_id}'."
+                )
+
+    def _fix_nodes_without_path_to_final(
+        self,
+        nodes: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+        changes: list[str],
+    ) -> None:
+        final_id = self._get_first_final_id(nodes)
+        if not final_id:
+            return
+
+        outgoing = self._build_outgoing_from_links(links)
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+
+            node_id = str(node.get("id") or "")
+            node_type = node.get("type")
+
+            if not node_id:
+                continue
+
+            if node_type not in {"ACTION", "FORK", "JOIN"}:
+                continue
+
+            reachable = self._reachable_from(node_id, outgoing)
+
+            if final_id in reachable:
+                continue
+
+            if self._link_exists(links, node_id, final_id):
+                continue
+
+            links.append(
+                {
+                    "id": self._build_link_id(node_id, final_id),
+                    "source_id": node_id,
+                    "target_id": final_id,
+                    "label": None,
+                }
+            )
+
+            outgoing.setdefault(node_id, []).append(final_id)
+
+            changes.append(
+                f"Se conectó el nodo '{node_id}' al FINAL para asegurar cierre del flujo."
+            )
+
     def _repair_missing_template_suggestions(
         self,
         parsed_response: dict[str, Any],
@@ -288,6 +913,19 @@ Reglas obligatorias:
 
         if not isinstance(suggestions, list):
             suggestions = []
+
+        action_node_ids = {
+            node.get("id")
+            for node in nodes
+            if isinstance(node, dict) and node.get("type") == "ACTION"
+        }
+
+        suggestions = [
+            suggestion
+            for suggestion in suggestions
+            if isinstance(suggestion, dict)
+            and suggestion.get("node_id") in action_node_ids
+        ]
 
         suggested_node_ids = {
             suggestion.get("node_id")
@@ -351,6 +989,29 @@ Reglas obligatorias:
         node_name: str,
     ) -> list[dict[str, Any]]:
         normalized_name = node_name.lower()
+        normalized_safe = self._normalize_text(node_name)
+
+        if self._is_operational_action_name(normalized_safe):
+            return [
+                {
+                    "type": "TEXTAREA",
+                    "label": "Detalle de la tarea",
+                    "required": True,
+                    "options": [],
+                    "ui_props": {
+                        "grid_cols": 2,
+                    },
+                },
+                {
+                    "type": "TEXTAREA",
+                    "label": "Observaciones",
+                    "required": False,
+                    "options": [],
+                    "ui_props": {
+                        "grid_cols": 2,
+                    },
+                },
+            ]
 
         if "disponibilidad" in normalized_name or "disponible" in normalized_name:
             return [
@@ -419,6 +1080,37 @@ Reglas obligatorias:
                         {
                             "label": "No",
                             "value": "no",
+                        },
+                    ],
+                    "ui_props": {
+                        "grid_cols": 1,
+                    },
+                },
+                {
+                    "type": "TEXTAREA",
+                    "label": "Observaciones",
+                    "required": False,
+                    "options": [],
+                    "ui_props": {
+                        "grid_cols": 2,
+                    },
+                },
+            ]
+
+        if "document" in normalized_name or "documentación" in normalized_name:
+            return [
+                {
+                    "type": "SELECT",
+                    "label": "¿Documentación completa?",
+                    "required": True,
+                    "options": [
+                        {
+                            "label": "Completo",
+                            "value": "completo",
+                        },
+                        {
+                            "label": "Incompleto",
+                            "value": "incompleto",
                         },
                     ],
                     "ui_props": {
@@ -652,6 +1344,10 @@ Reglas obligatorias:
                 cells.append(self._build_decision_node(node, lane, position_y))
                 continue
 
+            if node.type in {CompactNodeType.FORK, CompactNodeType.JOIN}:
+                cells.append(self._build_fork_join_node(node, lane, position_y))
+                continue
+
             template_suggestion = template_by_node_id.get(node.id)
             cells.append(
                 self._build_action_node(
@@ -847,6 +1543,49 @@ Reglas obligatorias:
             "connector": None,
         }
 
+    def _build_fork_join_node(
+        self,
+        node: CompactNode,
+        lane: dict[str, Any],
+        position_y: int,
+    ) -> dict[str, Any]:
+        return {
+            "id": node.id,
+            "type": "standard.Rectangle",
+            "position": {
+                "x": lane["x"] + 70,
+                "y": position_y,
+            },
+            "size": {
+                "width": 140,
+                "height": 18,
+            },
+            "source": None,
+            "target": None,
+            "attrs": {
+                "body": {
+                    "fill": "#111827",
+                    "stroke": "#111827",
+                    "strokeWidth": 1,
+                    "rx": 4,
+                    "ry": 4,
+                },
+                "label": {
+                    "text": "",
+                    "fill": "#111827",
+                },
+            },
+            "customData": {
+                "nombre": "Fork/Join",
+                "tipo": "FORK",
+                "laneId": lane["id"],
+            },
+            "labels": None,
+            "vertices": None,
+            "router": None,
+            "connector": None,
+        }
+
     def _build_link_cells(
         self,
         links: list[Any],
@@ -969,6 +1708,368 @@ Reglas obligatorias:
                 },
             }
         ]
+
+    def _get_outgoing_links(
+        self,
+        links: list[dict[str, Any]],
+        node_id: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            link
+            for link in links
+            if isinstance(link, dict) and link.get("source_id") == node_id
+        ]
+
+    def _get_incoming_links(
+        self,
+        links: list[dict[str, Any]],
+        node_id: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            link
+            for link in links
+            if isinstance(link, dict) and link.get("target_id") == node_id
+        ]
+
+    def _get_single_incoming_action_id(
+        self,
+        decision_id: str,
+        nodes: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+    ) -> str | None:
+        node_by_id = {
+            node.get("id"): node
+            for node in nodes
+            if isinstance(node, dict)
+        }
+
+        incoming_actions = [
+            str(link.get("source_id"))
+            for link in self._get_incoming_links(links, decision_id)
+            if node_by_id.get(link.get("source_id"), {}).get("type") == "ACTION"
+        ]
+
+        if len(incoming_actions) == 1:
+            return incoming_actions[0]
+
+        return None
+
+    def _find_best_matching_decision(
+        self,
+        action_node: dict[str, Any],
+        nodes: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        action_name = self._normalize_text(str(action_node.get("name") or ""))
+        best_decision: dict[str, Any] | None = None
+        best_score = 0
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+
+            if node.get("type") != "DECISION":
+                continue
+
+            decision_id = str(node.get("id") or "")
+            decision_name = self._normalize_text(str(node.get("name") or ""))
+
+            incoming_action_id = self._get_single_incoming_action_id(
+                decision_id=decision_id,
+                nodes=nodes,
+                links=links,
+            )
+
+            if incoming_action_id:
+                continue
+
+            score = self._similarity_score(action_name, decision_name)
+
+            if score > best_score:
+                best_score = score
+                best_decision = node
+
+        if best_score <= 0:
+            return None
+
+        return best_decision
+
+    def _get_decision_option_labels_from_suggestion(
+        self,
+        suggestion: dict[str, Any],
+        request: DiagramAiRequest,
+    ) -> list[str]:
+        if suggestion.get("strategy") == "USE_EXISTING_TEMPLATE":
+            existing_template_id = suggestion.get("existing_template_id")
+            if not existing_template_id:
+                return []
+
+            for template in request.existing_templates:
+                if template.id != existing_template_id:
+                    continue
+
+                for field in template.fields:
+                    if field.type.value != "SELECT":
+                        continue
+
+                    options = [
+                        {
+                            "label": option.label,
+                            "value": option.value,
+                        }
+                        for option in field.options
+                    ]
+
+                    if self._is_decision_options(options):
+                        return [option.label for option in field.options]
+
+            return []
+
+        template = suggestion.get("template")
+        if not isinstance(template, dict):
+            return []
+
+        fields = template.get("fields")
+        if not isinstance(fields, list):
+            return []
+
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+
+            if field.get("type") != "SELECT":
+                continue
+
+            options = field.get("options")
+            if not isinstance(options, list):
+                continue
+
+            if self._is_decision_options(options):
+                return [
+                    str(option.get("label") or option.get("value") or "")
+                    for option in options
+                    if isinstance(option, dict)
+                ]
+
+        return []
+
+    def _is_decision_options(
+        self,
+        options: list[dict[str, Any]],
+    ) -> bool:
+        values: set[str] = set()
+
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+
+            label = str(option.get("label") or "")
+            value = str(option.get("value") or "")
+
+            values.add(self._normalize_text(label))
+            values.add(self._normalize_text(value))
+
+        valid_pairs = [
+            {"si", "no"},
+            {"aprobado", "rechazado"},
+            {"aceptado", "rechazado"},
+            {"disponible", "no disponible"},
+            {"completo", "incompleto"},
+        ]
+
+        return any(pair.issubset(values) for pair in valid_pairs)
+
+    def _is_operational_action_name(self, name: str) -> bool:
+        normalized = self._normalize_text(name)
+
+        decision_keywords = [
+            "verificar",
+            "validar",
+            "revisar",
+            "confirmar",
+            "aprobar",
+            "evaluar",
+            "comprobar",
+        ]
+
+        if any(keyword in normalized for keyword in decision_keywords):
+            return False
+
+        operational_keywords = [
+            "solicitar correccion",
+            "correccion",
+            "corregir",
+            "ajustar",
+            "registrar",
+            "preparar",
+            "notificar",
+            "enviar",
+            "generar",
+            "emitir",
+            "entregar",
+            "recepcion",
+            "capturar",
+        ]
+
+        return any(keyword in normalized for keyword in operational_keywords)
+
+    def _is_decision_action_name(self, name: str) -> bool:
+        normalized = self._normalize_text(name)
+
+        keywords = [
+            "verificar",
+            "validar",
+            "revisar",
+            "confirmar",
+            "aprobar",
+            "evaluar",
+            "comprobar",
+            "disponibilidad",
+            "documentacion",
+            "listo",
+        ]
+
+        return any(keyword in normalized for keyword in keywords)
+
+    def _build_decision_name_from_action(self, action_name: str) -> str:
+        normalized = self._normalize_text(action_name)
+
+        if "document" in normalized:
+            return "¿Documentación completa?"
+
+        if "dispon" in normalized:
+            return "¿Está disponible?"
+
+        if "acept" in normalized:
+            return "¿Cliente acepta?"
+
+        if "listo" in normalized or "entrega" in normalized:
+            return "¿Todo listo?"
+
+        return f"¿{action_name}?"
+
+    def _get_first_final_id(
+        self,
+        nodes: list[dict[str, Any]],
+    ) -> str | None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+
+            if node.get("type") == "FINAL":
+                node_id = node.get("id")
+                return str(node_id) if node_id else None
+
+        return None
+
+    def _build_outgoing_from_links(
+        self,
+        links: list[dict[str, Any]],
+    ) -> dict[str, list[str]]:
+        outgoing: dict[str, list[str]] = {}
+
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+
+            source_id = link.get("source_id")
+            target_id = link.get("target_id")
+
+            if not source_id or not target_id:
+                continue
+
+            outgoing.setdefault(str(source_id), []).append(str(target_id))
+
+        return outgoing
+
+    def _reachable_from(
+        self,
+        start_id: str,
+        outgoing: dict[str, list[str]],
+    ) -> set[str]:
+        visited: set[str] = set()
+        queue: list[str] = [start_id]
+
+        while queue:
+            current = queue.pop(0)
+
+            if current in visited:
+                continue
+
+            visited.add(current)
+
+            for next_id in outgoing.get(current, []):
+                if next_id not in visited:
+                    queue.append(next_id)
+
+        return visited
+
+    def _link_exists(
+        self,
+        links: list[dict[str, Any]],
+        source_id: str,
+        target_id: str,
+    ) -> bool:
+        return any(
+            isinstance(link, dict)
+            and link.get("source_id") == source_id
+            and link.get("target_id") == target_id
+            for link in links
+        )
+
+    def _build_link_id(
+        self,
+        source_id: str,
+        target_id: str,
+        label: str | None = None,
+    ) -> str:
+        raw = f"link-{source_id}-{target_id}"
+
+        if label:
+            raw = f"{raw}-{label}"
+
+        return self._slugify(raw)
+
+    def _similarity_score(self, left: str, right: str) -> int:
+        left_words = {
+            word
+            for word in left.split()
+            if len(word) >= 4
+        }
+        right_words = {
+            word
+            for word in right.split()
+            if len(word) >= 4
+        }
+
+        return len(left_words.intersection(right_words))
+
+    def _slugify(self, value: str) -> str:
+        normalized = self._normalize_text(value)
+        normalized = normalized.replace("¿", "").replace("?", "")
+        normalized = normalized.replace("/", " ")
+        normalized = normalized.replace("_", " ")
+        parts = [
+            part
+            for part in normalized.split()
+            if part
+        ]
+
+        return "-".join(parts)[:90] or "item"
+
+    def _normalize_text(self, value: str) -> str:
+        normalized = value.strip().lower()
+        normalized = normalized.replace("sí", "si")
+        normalized = normalized.replace("á", "a")
+        normalized = normalized.replace("é", "e")
+        normalized = normalized.replace("í", "i")
+        normalized = normalized.replace("ó", "o")
+        normalized = normalized.replace("ú", "u")
+        normalized = normalized.replace("ñ", "n")
+        normalized = normalized.replace("¿", "")
+        normalized = normalized.replace("?", "")
+        normalized = " ".join(normalized.split())
+        return normalized
 
     def _parse_json_response(self, raw_response: str) -> dict[str, Any]:
         cleaned_response = self._clean_json_response(raw_response)

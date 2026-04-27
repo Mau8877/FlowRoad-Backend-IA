@@ -28,9 +28,20 @@ TIPOS DE NODOS PERMITIDOS:
 - FINAL
 - ACTION
 - DECISION
+- FORK
+- JOIN
 
 TIPOS DE LINKS:
 - CONTROL_FLOW
+
+REGLA IMPORTANTE SOBRE FORK/JOIN EN FLOWROAD:
+En el JSON compacto debes diferenciar:
+- FORK: barra que divide el flujo en ramas paralelas.
+- JOIN: barra que une/sincroniza ramas paralelas.
+
+Pero en el export visual final de FlowRoad, tanto FORK como JOIN se dibujan como
+una barra negra con customData.tipo = "FORK". FastAPI hará esa conversión.
+Tú solo debes usar FORK y JOIN correctamente en el JSON compacto.
 
 REGLAS DE NODOS:
 1. Todo diagrama debe tener exactamente un nodo INITIAL.
@@ -44,8 +55,10 @@ REGLAS DE NODOS:
 5. No inventes department_id.
 6. Cada ACTION debe tener una sugerencia de plantilla en template_suggestions.
 7. Los nodos DECISION no tienen plantilla.
-8. No generes nodos aislados.
-9. No generes links hacia nodos inexistentes.
+8. Los nodos FORK y JOIN no tienen plantilla.
+9. FORK y JOIN no deben aparecer en template_suggestions.
+10. No generes nodos aislados.
+11. No generes links hacia nodos inexistentes.
 
 REGLA DE INICIO DEL PROCESO:
 Si el usuario menciona que el proceso inicia con recepción, registro, solicitud,
@@ -70,6 +83,48 @@ INITIAL
 Ejemplo incorrecto:
 INITIAL
 -> ACTION "Verificar Disponibilidad"
+
+REGLAS DE PARALELISMO FORK/JOIN:
+1. Si el usuario pide tareas paralelas, simultáneas, al mismo tiempo,
+   ambas tareas, dividir el proceso, unir ramas, fork o join, debes usar
+   FORK y JOIN compactos.
+2. No representes tareas paralelas como una secuencia.
+3. FORK significa división paralela.
+4. JOIN significa unión/sincronización de ramas paralelas.
+5. En el JSON compacto usa:
+   - node.type = "FORK" para dividir.
+   - node.type = "JOIN" para unir.
+6. El FORK debe tener exactamente 1 entrada y mínimo 2 salidas.
+7. El JOIN debe tener mínimo 2 entradas y exactamente 1 salida.
+8. Las tareas paralelas deben salir del mismo FORK y llegar al mismo JOIN.
+9. Después del JOIN debe continuar el flujo principal.
+10. FORK y JOIN no tienen plantilla.
+11. FORK y JOIN no deben aparecer en template_suggestions.
+12. No conviertas FORK/JOIN en ACTION.
+13. No pongas una tarea paralela detrás de otra si deben ejecutarse en paralelo.
+
+Ejemplo correcto de paralelismo:
+nodes:
+- node-fork-preparacion type FORK
+- node-preparar-contrato type ACTION
+- node-preparar-vehiculo type ACTION
+- node-join-preparacion type JOIN
+
+links:
+- node-anterior -> node-fork-preparacion
+- node-fork-preparacion -> node-preparar-contrato
+- node-fork-preparacion -> node-preparar-vehiculo
+- node-preparar-contrato -> node-join-preparacion
+- node-preparar-vehiculo -> node-join-preparacion
+- node-join-preparacion -> node-siguiente
+
+Ejemplo incorrecto de paralelismo:
+node-anterior
+-> node-preparar-contrato
+-> node-preparar-vehiculo
+-> node-siguiente
+
+Eso es secuencia, no paralelismo.
 
 REGLA CRÍTICA DE DECISIONES:
 FlowRoad resuelve una DECISION usando la respuesta registrada en el último
@@ -201,6 +256,18 @@ La respuesta debe tener exactamente esta estructura:
         "type": "ACTION",
         "name": "Nombre de la tarea",
         "department_id": "id-real-del-departamento"
+      },
+      {
+        "id": "node-fork-paralelo",
+        "type": "FORK",
+        "name": "Dividir tareas paralelas",
+        "department_id": "id-real-del-departamento"
+      },
+      {
+        "id": "node-join-paralelo",
+        "type": "JOIN",
+        "name": "Unir tareas paralelas",
+        "department_id": "id-real-del-departamento"
       }
     ],
     "links": [
@@ -267,6 +334,10 @@ REGLAS ANTI-ERROR:
 6. Todo nodo creado debe ser alcanzable desde INITIAL.
 7. Antes de responder, verifica mentalmente que todos los ACTION llegan a FINAL.
 8. Si creas un nodo de notificación, rechazo, cancelación o no disponibilidad, conéctalo a FINAL.
+9. Si el usuario pide paralelismo, no lo simules con secuencia: usa FORK y JOIN.
+10. Todo FORK debe tener 1 entrada y mínimo 2 salidas.
+11. Todo JOIN debe tener mínimo 2 entradas y 1 salida.
+12. FORK y JOIN no tienen template_suggestions.
 
 VALIDACIONES ANTES DE RESPONDER:
 Antes de responder verifica:
@@ -274,11 +345,15 @@ Antes de responder verifica:
 2. ¿Hay al menos un FINAL?
 3. ¿Todos los nodos usan department_id real?
 4. ¿Todos los ACTION tienen template_suggestions?
-5. ¿Todos los links apuntan a nodos existentes?
-6. ¿Todo link que sale de DECISION tiene label?
-7. ¿Cada DECISION tiene antes un ACTION con SELECT compatible?
-8. ¿Si una plantilla ACTION tiene SELECT decisorio, existe DECISION después?
-9. ¿Si el usuario pidió recepción/solicitud inicial, existe un ACTION inicial para eso?
-10. ¿No inventaste departamentos?
-11. ¿La respuesta es JSON válido?
+5. ¿FORK y JOIN no tienen template_suggestions?
+6. ¿Todos los links apuntan a nodos existentes?
+7. ¿Todo link que sale de DECISION tiene label?
+8. ¿Cada DECISION tiene antes un ACTION con SELECT compatible?
+9. ¿Si una plantilla ACTION tiene SELECT decisorio, existe DECISION después?
+10. ¿Si el usuario pidió recepción/solicitud inicial, existe un ACTION inicial para eso?
+11. ¿Si el usuario pidió paralelismo, existe FORK y JOIN?
+12. ¿Cada FORK tiene mínimo 2 salidas?
+13. ¿Cada JOIN tiene mínimo 2 entradas?
+14. ¿No inventaste departamentos?
+15. ¿La respuesta es JSON válido?
 """
