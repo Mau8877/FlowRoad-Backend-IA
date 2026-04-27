@@ -258,16 +258,6 @@ Usa snake_case:
 - ui_props
 - grid_cols
 
-REGLAS ANTI-ERROR:
-1. Ningún ACTION puede quedar sin ruta hacia FINAL.
-2. Si un ACTION tiene un campo SELECT con opciones Si/No, Aprobado/Rechazado, Aceptado/Rechazado o Disponible/No disponible, debe existir una DECISION inmediatamente después de ese ACTION.
-3. Si no necesitas una DECISION después de un ACTION, no uses SELECT decisorio en su plantilla.
-4. Toda DECISION debe tener mínimo 2 links salientes.
-5. Todo link saliente desde DECISION debe tener label.
-6. Todo nodo creado debe ser alcanzable desde INITIAL.
-7. Antes de responder, verifica mentalmente que todos los ACTION llegan a FINAL.
-8. Si creas un nodo de notificación, rechazo, cancelación o no disponibilidad, conéctalo a FINAL.
-
 VALIDACIONES ANTES DE RESPONDER:
 Antes de responder verifica:
 1. ¿Hay exactamente un INITIAL?
