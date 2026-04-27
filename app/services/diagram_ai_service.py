@@ -20,6 +20,8 @@ from app.services.openrouter_service import OpenRouterService
 
 
 class DiagramAiService:
+    MAX_REPAIR_ATTEMPTS = 2
+
     def __init__(self) -> None:
         self.openrouter_service = OpenRouterService()
         self.semantic_validator = DiagramSemanticValidator()
@@ -28,48 +30,9 @@ class DiagramAiService:
         self,
         request: DiagramAiRequest,
     ) -> DiagramAiResponse:
-        raw_response = await self._call_model(request)
-        parsed_response = self._parse_json_response(raw_response)
-        parsed_response = self._repair_missing_template_suggestions(
-            parsed_response=parsed_response,
-            request=request,
+        compact_response, _raw_response = (
+            await self._generate_valid_compact_response(request)
         )
-
-        try:
-            compact_response = DiagramAiCompactResponse.model_validate(
-                parsed_response,
-            )
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={
-                    "message": (
-                        "La IA devolvió JSON compacto, pero no cumple "
-                        "el formato esperado."
-                    ),
-                    "errors": self._serialize_validation_errors(exc),
-                    "raw_response": raw_response,
-                },
-            ) from exc
-
-        semantic_errors = self.semantic_validator.validate(
-            diagram=compact_response.diagram,
-            template_suggestions=compact_response.template_suggestions,
-            existing_templates=request.existing_templates,
-        )
-
-        if semantic_errors:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "message": (
-                        "La propuesta de IA tiene errores semánticos "
-                        "y no es ejecutable todavía."
-                    ),
-                    "errors": semantic_errors,
-                    "raw_response": raw_response,
-                },
-            )
 
         return self._build_flowroad_response(
             compact_response=compact_response,
@@ -86,6 +49,80 @@ class DiagramAiService:
             message="Respuesta cruda generada correctamente.",
             raw_response=raw_response,
         )
+
+    async def _generate_valid_compact_response(
+        self,
+        request: DiagramAiRequest,
+    ) -> tuple[DiagramAiCompactResponse, str]:
+        raw_response = await self._call_model(request)
+
+        for attempt in range(self.MAX_REPAIR_ATTEMPTS + 1):
+            compact_response = self._parse_and_validate_compact_response(
+                raw_response=raw_response,
+                request=request,
+            )
+
+            semantic_errors = self.semantic_validator.validate(
+                diagram=compact_response.diagram,
+                template_suggestions=compact_response.template_suggestions,
+                existing_templates=request.existing_templates,
+            )
+
+            if not semantic_errors:
+                return compact_response, raw_response
+
+            if attempt >= self.MAX_REPAIR_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "message": (
+                            "No se pudo generar una propuesta ejecutable. "
+                            "Intenta describir el flujo con un poco más de "
+                            "detalle."
+                        ),
+                        "errors": semantic_errors,
+                        "raw_response": raw_response,
+                    },
+                )
+
+            raw_response = await self._call_repair_model(
+                request=request,
+                previous_raw_response=raw_response,
+                semantic_errors=semantic_errors,
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No se pudo completar la validación del diagrama.",
+        )
+
+    def _parse_and_validate_compact_response(
+        self,
+        raw_response: str,
+        request: DiagramAiRequest,
+    ) -> DiagramAiCompactResponse:
+        parsed_response = self._parse_json_response(raw_response)
+        parsed_response = self._repair_missing_template_suggestions(
+            parsed_response=parsed_response,
+            request=request,
+        )
+
+        try:
+            return DiagramAiCompactResponse.model_validate(
+                parsed_response,
+            )
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "message": (
+                        "La IA devolvió JSON compacto, pero no cumple "
+                        "el formato esperado."
+                    ),
+                    "errors": self._serialize_validation_errors(exc),
+                    "raw_response": raw_response,
+                },
+            ) from exc
 
     async def _call_model(self, request: DiagramAiRequest) -> str:
         context = self._build_context(request)
@@ -160,6 +197,63 @@ Reglas críticas:
             messages=[
                 {"role": "system", "content": DIAGRAM_AI_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=3000,
+        )
+
+    async def _call_repair_model(
+        self,
+        request: DiagramAiRequest,
+        previous_raw_response: str,
+        semantic_errors: list[str],
+    ) -> str:
+        context = self._build_context(request)
+        semantic_errors_text = "\n".join(
+            f"- {error}" for error in semantic_errors
+        )
+
+        repair_prompt = f"""
+La respuesta anterior de la IA no es ejecutable en FlowRoad.
+
+Instrucción original del usuario:
+{request.user_message}
+
+Contexto disponible en JSON:
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+JSON compacto anterior:
+{previous_raw_response}
+
+Errores semánticos detectados:
+{semantic_errors_text}
+
+Corrige el JSON compacto completo.
+Debes conservar la intención original del usuario.
+
+Reglas obligatorias:
+- Debes responder exclusivamente JSON válido.
+- No uses Markdown.
+- No expliques nada fuera del JSON.
+- No devuelvas attrs, router, connector, position, size, vertices ni labels visuales.
+- Usa solo nodes, links y template_suggestions en formato compacto.
+- No inventes departamentos fuera de available_departments.
+- Todo ACTION debe tener ruta hacia FINAL.
+- Todo ACTION con SELECT decisorio debe tener una DECISION inmediatamente después.
+- Si no pones DECISION después de un ACTION, cambia ese SELECT por un campo no decisorio.
+- Toda DECISION debe tener al menos 2 salidas.
+- Todo link saliente de DECISION debe tener label.
+- No dejes nodos huérfanos.
+- Si un ACTION queda sin salida, conéctalo al FINAL o a un nodo que llegue al FINAL.
+- Cada ACTION debe tener template_suggestions.
+- Si falta template_suggestion, puedes crear CREATE_NEW_TEMPLATE.
+- Usa snake_case.
+"""
+
+        return await self.openrouter_service.chat_completion(
+            messages=[
+                {"role": "system", "content": DIAGRAM_AI_SYSTEM_PROMPT},
+                {"role": "user", "content": repair_prompt},
             ],
             temperature=0.1,
             max_tokens=3000,
