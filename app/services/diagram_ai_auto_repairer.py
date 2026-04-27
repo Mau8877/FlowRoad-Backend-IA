@@ -40,6 +40,11 @@ class DiagramAiAutoRepairer:
             changes=changes,
         )
 
+        self._ensure_final_node_exists(
+            nodes=nodes,
+            changes=changes,
+        )
+
         self._ensure_decisions_have_action_before(
             nodes=nodes,
             links=links,
@@ -82,6 +87,49 @@ class DiagramAiAutoRepairer:
         )
 
         return parsed_response
+
+    def _ensure_final_node_exists(
+        self,
+        nodes: list[dict[str, Any]],
+        changes: list[str],
+    ) -> None:
+        has_final = any(
+            isinstance(node, dict) and node.get("type") == "FINAL"
+            for node in nodes
+        )
+
+        if has_final:
+            return
+
+        department_id = self._resolve_department_id_for_auto_final(nodes)
+
+        nodes.append(
+            {
+                "id": "node-final",
+                "type": "FINAL",
+                "name": "Fin",
+                "department_id": department_id,
+            }
+        )
+
+        changes.append(
+            "Se creó automáticamente un nodo FINAL porque la IA no lo incluyó."
+        )
+
+    def _resolve_department_id_for_auto_final(
+        self,
+        nodes: list[dict[str, Any]],
+    ) -> str:
+        for node in reversed(nodes):
+            if not isinstance(node, dict):
+                continue
+
+            department_id = str(node.get("department_id") or "").strip()
+
+            if department_id:
+                return department_id
+
+        return ""
 
     def _reuse_existing_templates_by_name(
         self,
@@ -749,6 +797,9 @@ class DiagramAiAutoRepairer:
         if "acept" in text:
             return "¿Cliente acepta?"
 
+        if "avanza" in text or "perfil" in text or "candidato" in text:
+            return "¿Candidato avanza?"
+
         if "dispon" in text:
             return "¿Está disponible?"
 
@@ -1021,6 +1072,9 @@ class DiagramAiAutoRepairer:
 
         if "aprob" in normalized:
             return "¿Cliente aprueba?"
+
+        if "avanza" in normalized or "perfil" in normalized or "candidato" in normalized:
+            return "¿Candidato avanza?"
 
         return f"¿{action_name}?"
 
