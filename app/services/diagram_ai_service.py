@@ -7,6 +7,7 @@ from app.schemas.diagram_ai_schemas import (
     DiagramAiRequest,
     DiagramAiResponse,
 )
+from app.services.diagram_ai_auto_repairer import DiagramAiAutoRepairer
 from app.services.diagram_ai_error_serializer import DiagramAiErrorSerializer
 from app.services.diagram_ai_flowroad_builder import DiagramAiFlowRoadBuilder
 from app.services.diagram_ai_prompt_builder import DiagramAiPromptBuilder
@@ -22,6 +23,7 @@ class DiagramAiService:
         self.prompt_builder = DiagramAiPromptBuilder()
         self.response_parser = DiagramAiResponseParser()
         self.template_repairer = DiagramAiTemplateRepairer()
+        self.auto_repairer = DiagramAiAutoRepairer()
         self.semantic_validator = DiagramSemanticValidator()
         self.flowroad_builder = DiagramAiFlowRoadBuilder()
         self.error_serializer = DiagramAiErrorSerializer()
@@ -98,6 +100,16 @@ class DiagramAiService:
     ) -> DiagramAiCompactResponse:
         parsed_response = self.response_parser.parse_json_response(
             raw_response,
+        )
+
+        parsed_response = self.template_repairer.repair_missing_template_suggestions(
+            parsed_response=parsed_response,
+            request=request,
+        )
+
+        parsed_response = self.auto_repairer.repair(
+            parsed_response=parsed_response,
+            request=request,
         )
 
         parsed_response = self.template_repairer.repair_missing_template_suggestions(
