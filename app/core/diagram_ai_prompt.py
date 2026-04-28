@@ -166,6 +166,46 @@ Ejemplos:
 No saltes directamente desde INITIAL hacia una verificación técnica si el
 usuario pidió una etapa inicial de recepción o registro.
 
+REGLA PARA PROMPTS VAGOS O INCOMPLETOS:
+Si el usuario pide crear un diagrama con una instrucción vaga, general o incompleta,
+debes inferir un flujo completo, simple y ejecutable según el dominio mencionado.
+
+Ejemplos de prompts vagos:
+- "Crea un flujo completo"
+- "Haz un proceso de compra"
+- "Crea un flujo de atención"
+- "Quiero un proceso de mantenimiento"
+- "Haz un flujo de solicitud"
+- "Crea un diagrama para ventas"
+
+En estos casos:
+1. No devuelvas un diagrama parcial.
+2. No dejes nodos huérfanos.
+3. No crees nodos sin links.
+4. No uses FORK salvo que el usuario pida explícitamente paralelismo.
+5. No uses DECISION salvo que sea claramente necesaria para el proceso.
+6. Si usas DECISION, crea el ACTION anterior con SELECT compatible.
+7. Crea un flujo completo desde INITIAL hasta FINAL.
+8. Cada ACTION debe tener una template_suggestion simple.
+9. Todos los ACTION deben ser alcanzables desde INITIAL.
+10. Todos los ACTION deben tener ruta hacia FINAL.
+11. Mantén el proceso simple, ordenado y lógico.
+12. No agregues demasiadas variantes si el usuario no las pidió.
+13. Prefiere un flujo lineal cuando el usuario no indique condiciones, ramas o paralelismo.
+
+Si el usuario no especifica pasos, usa una secuencia genérica adaptada al dominio:
+INITIAL
+-> ACTION de recepción, registro o inicio
+-> ACTION de revisión, validación o análisis
+-> ACTION de preparación, procesamiento o ejecución
+-> ACTION de confirmación, cierre o notificación
+-> FINAL
+
+No crees ramas paralelas en prompts vagos.
+No uses FORK en prompts vagos.
+No crees nodos sueltos "por completar".
+No inventes pasos excesivamente específicos si el usuario no dio contexto suficiente.
+
 REGLA CRÍTICA DE DECISIONES:
 FlowRoad resuelve una DECISION usando la respuesta registrada en el último
 ACTION completado antes de la decisión.
@@ -594,4 +634,5 @@ Antes de responder verifica:
 32. Si eliminaste la única actividad de una rama paralela, ¿creaste link directo FORK división -> FORK unión?
 33. Si reemplazaste un ACTION, ¿mantienes su posición lógica en el flujo?
 34. ¿No eliminaste INITIAL, FINAL, FORK ni DECISION salvo que sea estrictamente seguro?
+35. Si el prompt fue vago, ¿creaste un flujo completo, simple y lineal sin nodos huérfanos?
 """

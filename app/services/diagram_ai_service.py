@@ -13,7 +13,7 @@ from app.services.diagram_ai_flowroad_builder import DiagramAiFlowRoadBuilder
 from app.services.diagram_ai_prompt_builder import DiagramAiPromptBuilder
 from app.services.diagram_ai_response_parser import DiagramAiResponseParser
 from app.services.diagram_ai_template_repairer import DiagramAiTemplateRepairer
-from app.services.diagram_semantic_validator import DiagramSemanticValidator
+from app.services.validators.diagram_semantic_validator import DiagramSemanticValidator
 from app.services.openrouter_service import OpenRouterService
 
 
