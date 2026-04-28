@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -15,7 +16,9 @@ class DiagramAiResponseParser:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail={
                     "message": "La IA no devolvió JSON válido.",
+                    "error": str(exc),
                     "raw_response": raw_response,
+                    "cleaned_response": cleaned_response,
                 },
             ) from exc
 
@@ -33,13 +36,21 @@ class DiagramAiResponseParser:
     def clean_json_response(self, raw_response: str) -> str:
         cleaned = raw_response.strip()
 
-        if cleaned.startswith("```json"):
-            cleaned = cleaned.removeprefix("```json").strip()
+        # Caso 1: la IA devuelve ```json ... ```
+        fenced_match = re.search(
+            r"```(?:json)?\s*(.*?)\s*```",
+            cleaned,
+            re.DOTALL | re.IGNORECASE,
+        )
 
-        if cleaned.startswith("```"):
-            cleaned = cleaned.removeprefix("```").strip()
+        if fenced_match:
+            cleaned = fenced_match.group(1).strip()
 
-        if cleaned.endswith("```"):
-            cleaned = cleaned.removesuffix("```").strip()
+        # Caso 2: la IA devuelve texto antes o después del JSON
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start : end + 1].strip()
 
         return cleaned

@@ -33,6 +33,13 @@ class DiagramSemanticValidator:
             self._validate_decision_outgoing_links(diagram, outgoing)
         )
         errors.extend(
+            self._validate_fork_topology(
+                diagram=diagram,
+                incoming=incoming,
+                outgoing=outgoing,
+            )
+        )
+        errors.extend(
             self._validate_decision_previous_action_select(
                 diagram=diagram,
                 template_suggestions=template_suggestions,
@@ -107,6 +114,35 @@ class DiagramSemanticValidator:
                 errors.append(
                     f"La DECISION '{decision_id}' debe tener al menos 2 salidas."
                 )
+
+        return errors
+
+    def _validate_fork_topology(
+        self,
+        diagram: CompactDiagram,
+        incoming: dict[str, list[str]],
+        outgoing: dict[str, list[str]],
+    ) -> list[str]:
+        errors: list[str] = []
+
+        for node in diagram.nodes:
+            if node.type != CompactNodeType.FORK:
+                continue
+
+            incoming_count = len(incoming.get(node.id, []))
+            outgoing_count = len(outgoing.get(node.id, []))
+
+            is_split_fork = incoming_count == 1 and outgoing_count >= 2
+            is_join_fork = incoming_count >= 2 and outgoing_count == 1
+
+            if is_split_fork or is_join_fork:
+                continue
+
+            errors.append(
+                f"El nodo FORK '{node.id}' debe comportarse como fork "
+                "o como join. Un fork debe tener 1 entrada y 2 o más salidas. "
+                "Un join debe tener 2 o más entradas y 1 salida."
+            )
 
         return errors
 

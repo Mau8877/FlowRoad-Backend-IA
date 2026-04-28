@@ -18,6 +18,9 @@ from app.services.openrouter_service import OpenRouterService
 
 
 class DiagramAiService:
+    MODEL_TEMPERATURE = 0.0
+    MODEL_MAX_TOKENS = 9000
+
     def __init__(self) -> None:
         self.openrouter_service = OpenRouterService()
         self.prompt_builder = DiagramAiPromptBuilder()
@@ -89,8 +92,8 @@ class DiagramAiService:
                     "content": user_prompt,
                 },
             ],
-            temperature=0.1,
-            max_tokens=3000,
+            temperature=self.MODEL_TEMPERATURE,
+            max_tokens=self.MODEL_MAX_TOKENS,
         )
 
     def _parse_repair_and_validate(
@@ -102,6 +105,11 @@ class DiagramAiService:
             raw_response,
         )
 
+        # El modo real lo define el request del backend/frontend.
+        # No confiamos en el valor que devuelva la IA porque puede copiar
+        # el ejemplo del prompt y responder siempre "CREATE".
+        parsed_response["mode"] = request.mode.value
+
         parsed_response = self.template_repairer.repair_missing_template_suggestions(
             parsed_response=parsed_response,
             request=request,
@@ -112,6 +120,8 @@ class DiagramAiService:
             request=request,
         )
 
+        # Segunda pasada: después del auto_repairer pueden aparecer nodos ACTION
+        # nuevos o cambios que requieran completar sugerencias de plantilla.
         parsed_response = self.template_repairer.repair_missing_template_suggestions(
             parsed_response=parsed_response,
             request=request,

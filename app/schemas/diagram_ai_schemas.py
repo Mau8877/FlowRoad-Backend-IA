@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DiagramAiMode(str, Enum):
@@ -14,6 +14,7 @@ class CompactNodeType(str, Enum):
     FINAL = "FINAL"
     ACTION = "ACTION"
     DECISION = "DECISION"
+    FORK = "FORK"
 
 
 class FieldType(str, Enum):
@@ -86,6 +87,14 @@ class CompactNode(BaseModel):
     type: CompactNodeType
     name: str
     department_id: str
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def normalize_join_to_fork(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip().upper() == "JOIN":
+            return "FORK"
+
+        return value
 
 
 class CompactLink(BaseModel):

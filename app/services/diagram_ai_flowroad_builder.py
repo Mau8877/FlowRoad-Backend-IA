@@ -10,6 +10,7 @@ from app.schemas.diagram_ai_schemas import (
     DiagramAiResponse,
     FlowRoadDiagram,
     TemplateStrategy,
+    TemplateSuggestion,
 )
 
 
@@ -38,9 +39,15 @@ class DiagramAiFlowRoadBuilder:
             warnings=warnings,
         )
 
+        valid_template_suggestions = self.filter_template_suggestions_for_actions(
+            nodes=compact_response.diagram.nodes,
+            template_suggestions=compact_response.template_suggestions,
+            warnings=warnings,
+        )
+
         template_by_node_id = {
             suggestion.node_id: suggestion
-            for suggestion in compact_response.template_suggestions
+            for suggestion in valid_template_suggestions
         }
 
         lanes = self.build_lanes(
@@ -76,7 +83,7 @@ class DiagramAiFlowRoadBuilder:
             message=compact_response.message,
             mode=compact_response.mode,
             diagram=diagram,
-            template_suggestions=compact_response.template_suggestions,
+            template_suggestions=valid_template_suggestions,
             warnings=warnings,
             changes_summary=compact_response.changes_summary,
         )
@@ -96,6 +103,32 @@ class DiagramAiFlowRoadBuilder:
                     f"{node.id}. Se reasignó al primer departamento disponible."
                 )
                 node.department_id = fallback_department_id
+
+    def filter_template_suggestions_for_actions(
+        self,
+        nodes: list[CompactNode],
+        template_suggestions: list[TemplateSuggestion],
+        warnings: list[str],
+    ) -> list[TemplateSuggestion]:
+        action_ids = {
+            node.id
+            for node in nodes
+            if node.type == CompactNodeType.ACTION
+        }
+
+        valid_suggestions: list[TemplateSuggestion] = []
+
+        for suggestion in template_suggestions:
+            if suggestion.node_id in action_ids:
+                valid_suggestions.append(suggestion)
+                continue
+
+            warnings.append(
+                "Se ignoró una template_suggestion asociada a un nodo que "
+                f"no es ACTION: {suggestion.node_id}."
+            )
+
+        return valid_suggestions
 
     def build_lanes(
         self,
@@ -157,6 +190,10 @@ class DiagramAiFlowRoadBuilder:
 
             if node.type == CompactNodeType.DECISION:
                 cells.append(self.build_decision_node(node, lane, position_y))
+                continue
+
+            if node.type == CompactNodeType.FORK:
+                cells.append(self.build_fork_node(node, lane, position_y))
                 continue
 
             template_suggestion = template_by_node_id.get(node.id)
@@ -345,6 +382,49 @@ class DiagramAiFlowRoadBuilder:
                 "tipo": "DECISION",
                 "laneId": lane["id"],
                 "templateDocumentId": "",
+            },
+            "labels": None,
+            "vertices": None,
+            "router": None,
+            "connector": None,
+        }
+
+    def build_fork_node(
+        self,
+        node: CompactNode,
+        lane: dict[str, Any],
+        position_y: int,
+    ) -> dict[str, Any]:
+        return {
+            "id": node.id,
+            "type": "standard.Rectangle",
+            "position": {
+                "x": lane["x"] + 70,
+                "y": position_y,
+            },
+            "size": {
+                "width": 140,
+                "height": 18,
+            },
+            "source": None,
+            "target": None,
+            "attrs": {
+                "body": {
+                    "fill": "#111827",
+                    "stroke": "#111827",
+                    "strokeWidth": 1,
+                    "rx": 4,
+                    "ry": 4,
+                },
+                "label": {
+                    "text": "",
+                    "fill": "#111827",
+                },
+            },
+            "customData": {
+                "nombre": node.name or "Fork/Join",
+                "tipo": "FORK",
+                "laneId": lane["id"],
             },
             "labels": None,
             "vertices": None,
