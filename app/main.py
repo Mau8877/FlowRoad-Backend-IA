@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.routers.diagram_ai_router import router as diagram_ai_router
 from app.routers.worker_ai_router import router as worker_ai_router
+from app.routers.dashboard_ai_router import router as dashboard_ai_router
 
 settings = get_settings()
 
@@ -23,7 +24,7 @@ app.add_middleware(
 
 app.include_router(diagram_ai_router)
 app.include_router(worker_ai_router)
-
+app.include_router(dashboard_ai_router)
 
 @app.get("/")
 def root() -> dict[str, str]:
